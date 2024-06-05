@@ -9,7 +9,8 @@ import sys
 import numpy as np
 import math
 import six
-from gym import error
+from gymnasium import error
+from lbforaging.utils import from_one_hot
 
 if "Apple" in sys.version:
     if "DYLD_FALLBACK_LIBRARY_PATH" in os.environ:
@@ -19,6 +20,7 @@ if "Apple" in sys.version:
 
 try:
     import pyglet
+    from pyglet import shapes
 except ImportError as e:
     raise ImportError(
         """
@@ -90,12 +92,13 @@ class Viewer(object):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         script_dir = os.path.dirname(__file__)
-
         pyglet.resource.path = [os.path.join(script_dir, "icons")]
         pyglet.resource.reindex()
 
-        self.img_apple = pyglet.resource.image("apple.png")
-        self.img_agent = pyglet.resource.image("agent.png")
+        self.agent_icon = pyglet.resource.image("agent.png")
+        self.food_icons = [
+            pyglet.resource.image(fn) for fn in ["apple.png", "orange.png", "plum.png"]
+        ]
 
     def close(self):
         self.window.close()
@@ -142,10 +145,10 @@ class Viewer(object):
                 (
                     "v2f",
                     (
-                        0, # LEFT X
-                        (self.grid_size + 1) * r + 1, # Y
-                        (self.grid_size + 1) * self.cols, # RIGHT X
-                        (self.grid_size + 1) * r + 1, # Y
+                        0,  # LEFT X
+                        (self.grid_size + 1) * r + 1,  # Y
+                        (self.grid_size + 1) * self.cols,  # RIGHT X
+                        (self.grid_size + 1) * r + 1,  # Y
                     ),
                 ),
                 ("c3B", (*_BLACK, *_BLACK)),
@@ -160,10 +163,10 @@ class Viewer(object):
                 (
                     "v2f",
                     (
-                        (self.grid_size + 1) * c + 1, # X
-                        0, # BOTTOM Y
-                        (self.grid_size + 1) * c + 1, # X
-                        (self.grid_size + 1) * self.rows, # TOP X
+                        (self.grid_size + 1) * c + 1,  # X
+                        0,  # BOTTOM Y
+                        (self.grid_size + 1) * c + 1,  # X
+                        (self.grid_size + 1) * self.rows,  # TOP X
                     ),
                 ),
                 ("c3B", (*_BLACK, *_BLACK)),
@@ -171,26 +174,27 @@ class Viewer(object):
         batch.draw()
 
     def _draw_food(self, env):
-        idxes = list(zip(*env.field.nonzero()))
-        apples = []
-        batch = pyglet.graphics.Batch()
+        food_levels, food_features = env.field[:, :, 0], env.field[:, :, 1:]
+        idxes = list(zip(*food_levels.nonzero()))
+        foods, batch = [], pyglet.graphics.Batch()
 
         # print(env.field)
         for row, col in idxes:
-            apples.append(
+            food_type = from_one_hot(food_features[row, col])
+            foods.append(
                 pyglet.sprite.Sprite(
-                    self.img_apple,
+                    self.food_icons[food_type],
                     (self.grid_size + 1) * col,
                     self.height - (self.grid_size + 1) * (row + 1),
                     batch=batch,
                 )
             )
-        for a in apples:
-            a.update(scale=self.grid_size / a.width)
+        for f in foods:
+            f.update(scale=self.grid_size / f.width)
         batch.draw()
 
         for row, col in idxes:
-            self._draw_badge(row, col, env.field[row, col])
+            self._draw_badge(row, col, env.field[row, col, 0])
 
     def _draw_players(self, env):
         players = []
@@ -200,7 +204,7 @@ class Viewer(object):
             row, col = player.position
             players.append(
                 pyglet.sprite.Sprite(
-                    self.img_agent,
+                    self.agent_icon,
                     (self.grid_size + 1) * col,
                     self.height - (self.grid_size + 1) * (row + 1),
                     batch=batch,
@@ -209,15 +213,63 @@ class Viewer(object):
         for p in players:
             p.update(scale=self.grid_size / p.width)
         batch.draw()
-        for p in env.players:
+        for m, p in enumerate(env.players):
+            if m == 0:
+                self._draw_player_marker(*p.position)
             self._draw_badge(*p.position, p.level)
+            self._draw_player_feature(*p.position, p.features)
+
+    def _draw_player_feature(self, row, col, feature):
+        f = from_one_hot(feature)
+        assert f < 3
+
+        bar_x = (col * (self.grid_size + 1)) + 1
+        bar_y = self.height - (self.grid_size + 1) * (row + 1)
+
+        bar_length, bar_height = self.grid_size, self.grid_size / 8
+
+        verts = [
+            bar_x,
+            bar_y,
+            bar_x + bar_length,
+            bar_y,
+            bar_x + bar_length,
+            bar_y + bar_height,
+            bar_x,
+            bar_y + bar_height,
+        ]
+        rectangle = pyglet.graphics.vertex_list(4, ("v2f", verts))
+        colour = [(255, 0, 0), (0, 255, 0), (0, 0, 255)][f]
+        glColor3ub(*colour)
+        rectangle.draw(GL_POLYGON)
+
+    def _draw_player_marker(self, row, col):
+        # draw an upside-down triangle above the player
+        marker_x = col * (self.grid_size + 1) + (self.grid_size + 1) / 2
+        marker_y = self.height - (self.grid_size + 1) * (row + 0.05)
+
+        verts = [
+            marker_x,
+            marker_y - self.grid_size / 8,  # bottom
+            marker_x - self.grid_size / 8,
+            marker_y + self.grid_size / 8,  # left
+            marker_x + self.grid_size / 8,
+            marker_y + self.grid_size / 8,  # right
+        ]
+        triangle = pyglet.graphics.vertex_list(3, ("v2f", verts))
+        glColor3ub(*_RED)
+        triangle.draw(GL_POLYGON)
 
     def _draw_badge(self, row, col, level):
         resolution = 6
         radius = self.grid_size / 5
 
         badge_x = col * (self.grid_size + 1) + (3 / 4) * (self.grid_size + 1)
-        badge_y = self.height - (self.grid_size + 1) * (row + 1) + (1 / 4) * (self.grid_size + 1)
+        badge_y = (
+            self.height
+            - (self.grid_size + 1) * (row + 1)
+            + (1 / 4) * (self.grid_size + 1)
+        )
 
         # make a circle
         verts = []
